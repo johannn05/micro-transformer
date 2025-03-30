@@ -263,3 +263,19 @@ def build_transformer(src_vocab_size: int, tgt_vocab_size: int, src_seq_len: int
             nn.init.xavier_uniform_(p)
     
     return transformer
+
+def make_model_quantizable(model):
+    """
+    Add quantization support to model
+    """
+    # Replace layer implementations with quantizable versions
+    for name, module in model.named_children():
+        if isinstance(module, nn.Linear):
+            model._modules[name] = nn.quantized.Linear.from_float(module)
+        elif isinstance(module, nn.LayerNorm):
+            # LayerNorm is not quantized
+            pass
+        else:
+            make_model_quantizable(module)
+    
+    return model
