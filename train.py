@@ -23,9 +23,9 @@ from tokenizers.pre_tokenizers import Whitespace
 import wandb
 import torchmetrics
 
-from model import build_transformer
-from dataset import BilingualDataset, causal_mask
-from config import get_default_config, get_weights_file_path, get_latest_weights_file_path, ModelConfig
+from utils.model import build_transformer
+from utils.dataset import BilingualDataset, causal_mask
+from utils.config import get_default_config, get_weights_file_path, get_latest_weights_file_path, ModelConfig
 
 def greedy_decode(model: nn.Module, source: torch.Tensor, source_mask: torch.Tensor, tokenizer_src: Tokenizer, tokenizer_tgt: Tokenizer, max_len: int, device: torch.device):
     sos_idx = tokenizer_tgt.token_to_id('[SOS]')
