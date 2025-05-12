@@ -1,6 +1,9 @@
 import torch
 import torch.nn as nn
 import math
+from utils.layers import MicrotensorLayerNorm
+from utils.attention import MicrotensorAttentionOps
+
 
 class InputEmbeddings(nn.Module):
 
@@ -59,83 +62,202 @@ class LayerNormalization(nn.Module):
         return self.alpha * (x - mean) / (std + self.eps) + self.bias
 
 class FeedForwardBlock(nn.Module):
-
     def __init__(self, d_model: int, d_ff: int, dropout: float) -> None:
         super().__init__()
-        self.linear_1 = nn.Linear(d_model, d_ff) # w1 and b1
+        self.linear_1 = nn.Linear(d_model, d_ff)
         self.dropout = nn.Dropout(dropout)
-        self.linear_2 = nn.Linear(d_ff, d_model) # w2 and b2
+        self.linear_2 = nn.Linear(d_ff, d_model)
 
     def forward(self, x):
-        # (batch, seq_len, d_model) --> (batch, seq_len, d_ff) --> (batch, seq_len, d_model)
-        return self.linear_2(self.dropout(torch.relu(self.linear_1(x))))
+        # Check for environment variable to disable microtensor
+        import os
+        if os.environ.get('DISABLE_MICROTENSOR') == '1':
+            # Use original PyTorch implementation
+            return self.linear_2(self.dropout(torch.relu(self.linear_1(x))))
+        else:
+            # Use microtensor implementation
+            from utils.feedforward import MicrotensorFeedForward
+            return MicrotensorFeedForward.forward(
+                x, 
+                self.linear_1.weight, 
+                self.linear_1.bias,
+                self.linear_2.weight,
+                self.linear_2.bias,
+                dropout_rate=self.dropout.p,
+                training=self.training
+            )
     
 class ResidualConnection(nn.Module):
     
         def __init__(self, features: int, dropout: float) -> None:
             super().__init__()
             self.dropout = nn.Dropout(dropout)
-            self.norm = LayerNormalization(features)
+            self.norm = MicrotensorLayerNorm(features)
     
         def forward(self, x, sublayer):
             return x + self.dropout(sublayer(self.norm(x)))
 
-class MultiHeadAttentionBlock(nn.Module):
-
-    def __init__(self, d_model: int, h: int, dropout: float) -> None:
+class MultiHeadLatentAttentionBlock(nn.Module):
+    def __init__(self, d_model: int, h: int, d_c: int, d_cr: int, d_rope: int, dropout: float) -> None:
         super().__init__()
-        self.d_model = d_model # Embedding vector size
-        self.h = h # Number of heads
-        # Make sure d_model is divisible by h
-        assert d_model % h == 0, "d_model is not divisible by h"
+        self.h = h
+        self.d_k = d_model // h
+        self.d_c = d_c
+        self.d_cr = d_cr
+        self.d_rope = d_rope
 
-        self.d_k = d_model // h # Dimension of vector seen by each head
-        self.w_q = nn.Linear(d_model, d_model, bias=False) # Wq
-        self.w_k = nn.Linear(d_model, d_model, bias=False) # Wk
-        self.w_v = nn.Linear(d_model, d_model, bias=False) # Wv
-        self.w_o = nn.Linear(d_model, d_model, bias=False) # Wo
+        self.W_DKV = nn.Linear(d_model, d_c)
+        self.W_UK = nn.Linear(d_c, d_model)
+        self.W_UV = nn.Linear(d_c, d_model)
+
+        self.W_DQ = nn.Linear(d_model, d_cr)
+        self.W_UQ = nn.Linear(d_cr, d_model)
+
+        self.W_QR = nn.Linear(d_cr, h * d_rope)
+        self.W_KR = nn.Linear(d_model, d_rope)
+
+        self.W_O = nn.Linear(d_model, d_model)
         self.dropout = nn.Dropout(dropout)
 
-    @staticmethod #no need instance of class
-    def attention(query, key, value, mask, dropout: nn.Dropout):
-        d_k = query.shape[-1]
-        # apply the formula from the paper
-        # (batch, h, seq_len, d_k) --> (batch, h, seq_len, seq_len)
-        attention_scores = (query @ key.transpose(-2, -1)) / math.sqrt(d_k)
-        if mask is not None:
-            # Write a very low value (indicating -inf) to the positions where mask == 0
-            attention_scores.masked_fill_(mask == 0, -1e9)
-        attention_scores = attention_scores.softmax(dim=-1) # (batch, h, seq_len, seq_len) # Apply softmax
-        if dropout is not None:
-            attention_scores = dropout(attention_scores)
-        # (batch, h, seq_len, seq_len) --> (batch, h, seq_len, d_k)
-        # return attention scores  for visualization
-        return (attention_scores @ value), attention_scores
-
     def forward(self, q, k, v, mask):
-        query = self.w_q(q) # (batch, seq_len, d_model) --> (batch, seq_len, d_model) Q'
-        key = self.w_k(k) # (batch, seq_len, d_model) --> (batch, seq_len, d_model) K'
-        value = self.w_v(v) # (batch, seq_len, d_model) --> (batch, seq_len, d_model) V'
+        # Check for environment variable to disable microtensor
+        import os
+        if os.environ.get('DISABLE_MICROTENSOR') == '1':
+            # Original PyTorch implementation
+            if not (q is k and k is v):
+                # Apply projection for cross attention
+                c_kv = self.W_DKV(k)
+                k_C = self.W_UK(c_kv)
+                v_C = self.W_UV(c_kv)
 
-        # (batch, seq_len, d_model) --> (batch, seq_len, h, d_k) --> (batch, h, seq_len, d_k)  (split into heads)
-        query = query.view(query.shape[0], query.shape[1], self.h, self.d_k).transpose(1, 2)
-        key = key.view(key.shape[0], key.shape[1], self.h, self.d_k).transpose(1, 2)
-        value = value.view(value.shape[0], value.shape[1], self.h, self.d_k).transpose(1, 2)
+                c_q = self.W_DQ(q)
+                q_C = self.W_UQ(c_q)
 
-        # Calculate attention
-        x, self.attention_scores = MultiHeadAttentionBlock.attention(query, key, value, mask, self.dropout)
-        
-        # Combine all the heads together
-        # (batch, h, seq_len, d_k) --> (batch, seq_len, h, d_k) --> (batch, seq_len, d_model)
-        x = x.transpose(1, 2).contiguous().view(x.shape[0], -1, self.h * self.d_k)
+                q_R = self.W_QR(c_q).view(q.shape[0], q.shape[1], self.h, self.d_rope)
+                k_R = self.W_KR(k).unsqueeze(2).expand(-1, -1, self.h, -1)
+                if not hasattr(self, "_debugged"):
+                    print("q_C mean/std:", q_C.mean().item(), q_C.std().item())
+                    print("k_C mean/std:", k_C.mean().item(), k_C.std().item())
+                    print("q_R mean/std:", q_R.mean().item(), q_R.std().item())
+                    print("k_R mean/std:", k_R.mean().item(), k_R.std().item())
+                    self._debugged = True
+            else:
+                x = q
+                c_kv = self.W_DKV(x)
+                k_C = self.W_UK(c_kv)
+                v_C = self.W_UV(c_kv)
 
-        # Multiply by Wo
-        # (batch, seq_len, d_model) --> (batch, seq_len, d_model)  
-        return self.w_o(x)
+                c_q = self.W_DQ(x)
+                q_C = self.W_UQ(c_q)
+
+                q_R = self.W_QR(c_q).view(x.shape[0], x.shape[1], self.h, self.d_rope)
+                k_R = self.W_KR(x).unsqueeze(2).expand(-1, -1, self.h, -1)
+            
+            # Use original PyTorch rope implementation
+            half = q_R.shape[-1] // 2
+            freq = 1.0 / (10000 ** (torch.arange(half, dtype=torch.float32, device=q_R.device) / half))
+            angle = q_R[..., :half] * freq.view(1, 1, 1, -1)
+            q_R = torch.cat([torch.sin(angle), torch.cos(angle)], dim=-1)
+            
+            angle = k_R[..., :half] * freq.view(1, 1, 1, -1)
+            k_R = torch.cat([torch.sin(angle), torch.cos(angle)], dim=-1)
+
+            B, T_q = q_C.shape[:2]
+            T_k = k_C.shape[1]
+
+            q_C_split = q_C.view(B, T_q, self.h, self.d_k)
+            k_C_split = k_C.view(B, T_k, self.h, self.d_k)
+
+            q_C_base = q_C_split[:, :, :, :self.d_k - self.d_rope]
+            k_C_base = k_C_split[:, :, :, :self.d_k - self.d_rope]
+
+            q = torch.cat([q_C_base, q_R], dim=-1)
+            k = torch.cat([k_C_base, k_R], dim=-1)
+            v = v_C.view(B, T_k, self.h, self.d_k)
+
+            # Original attention computation
+            q, k, v = [t.transpose(1, 2) for t in (q, k, v)]
+            scores = (q @ k.transpose(-2, -1)) / math.sqrt(self.d_k)
+            if mask is not None:
+                scores = scores.masked_fill(mask == 0, -1e9)
+            attn = self.dropout(scores.softmax(dim=-1))
+            x = attn @ v
+            x = x.transpose(1, 2).contiguous().view(B, T_q, -1)
+            
+            return self.W_O(x)
+        else:
+            # Microtensor implementation
+            if not (q is k and k is v):
+                # Apply projection for cross attention
+                c_kv = self.W_DKV(k)
+                k_C = self.W_UK(c_kv)
+                v_C = self.W_UV(c_kv)
+
+                c_q = self.W_DQ(q)
+                q_C = self.W_UQ(c_q)
+
+                q_R = self.W_QR(c_q).view(q.shape[0], q.shape[1], self.h, self.d_rope)
+                k_R = self.W_KR(k).unsqueeze(2).expand(-1, -1, self.h, -1)
+                if not hasattr(self, "_debugged"):
+                    print("q_C mean/std:", q_C.mean().item(), q_C.std().item())
+                    print("k_C mean/std:", k_C.mean().item(), k_C.std().item())
+                    print("q_R mean/std:", q_R.mean().item(), q_R.std().item())
+                    print("k_R mean/std:", k_R.mean().item(), k_R.std().item())
+                    self._debugged = True
+            else:
+                x = q
+                c_kv = self.W_DKV(x)
+                k_C = self.W_UK(c_kv)
+                v_C = self.W_UV(c_kv)
+
+                c_q = self.W_DQ(x)
+                q_C = self.W_UQ(c_q)
+
+                q_R = self.W_QR(c_q).view(x.shape[0], x.shape[1], self.h, self.d_rope)
+                k_R = self.W_KR(x).unsqueeze(2).expand(-1, -1, self.h, -1)
+            
+            q_R = self.apply_rope(q_R)
+            k_R = self.apply_rope(k_R)
+
+            B, T_q = q_C.shape[:2]
+            T_k = k_C.shape[1]
+
+            q_C_split = q_C.view(B, T_q, self.h, self.d_k)
+            k_C_split = k_C.view(B, T_k, self.h, self.d_k)
+
+            q_C_base = q_C_split[:, :, :, :self.d_k - self.d_rope]
+            k_C_base = k_C_split[:, :, :, :self.d_k - self.d_rope]
+
+            q = torch.cat([q_C_base, q_R], dim=-1)
+            k = torch.cat([k_C_base, k_R], dim=-1)
+            v = v_C.view(B, T_k, self.h, self.d_k)
+
+            # Use microtensor attention
+            from utils.attention import MicrotensorAttentionOps
+            x = MicrotensorAttentionOps.scaled_dot_product(
+                q.transpose(1, 2),  # [B, H, T_q, dim]
+                k.transpose(1, 2),  # [B, H, T_k, dim]
+                v.transpose(1, 2),  # [B, H, T_k, dim]
+                scale=1.0/math.sqrt(self.d_k),
+                mask=mask
+            )
+
+            # Reshape the output to match the original format
+            x = x.transpose(1, 2).contiguous().view(B, T_q, -1)
+            return self.W_O(x)
+    
+
+    def apply_rope(self, x):
+        half = x.shape[-1] // 2
+        freq = 1.0 / (10000 ** (torch.arange(half, dtype=torch.float32, device=x.device) / half))
+        angle = x[..., :half] * freq.view(1, 1, 1, -1)  # broadcast to B, T, H, half
+        return torch.cat([torch.sin(angle), torch.cos(angle)], dim=-1)
+
+
 
 class EncoderBlock(nn.Module):
 
-    def __init__(self, features: int, self_attention_block: MultiHeadAttentionBlock, feed_forward_block: FeedForwardBlock, dropout: float) -> None:
+    def __init__(self, features: int, self_attention_block: MultiHeadLatentAttentionBlock, feed_forward_block: FeedForwardBlock, dropout: float) -> None:
         super().__init__()
         self.self_attention_block = self_attention_block
         self.feed_forward_block = feed_forward_block
@@ -151,7 +273,8 @@ class Encoder(nn.Module):
     def __init__(self, features: int, layers: nn.ModuleList) -> None:
         super().__init__()
         self.layers = layers
-        self.norm = LayerNormalization(features)
+        self.norm = MicrotensorLayerNorm(features)
+
 
     def forward(self, x, mask):
         for layer in self.layers:
@@ -160,7 +283,7 @@ class Encoder(nn.Module):
 
 class DecoderBlock(nn.Module):
 
-    def __init__(self, features: int, self_attention_block: MultiHeadAttentionBlock, cross_attention_block: MultiHeadAttentionBlock, feed_forward_block: FeedForwardBlock, dropout: float) -> None:
+    def __init__(self, features: int, self_attention_block: MultiHeadLatentAttentionBlock, cross_attention_block: MultiHeadLatentAttentionBlock, feed_forward_block: FeedForwardBlock, dropout: float) -> None:
         super().__init__()
         self.self_attention_block = self_attention_block
         self.cross_attention_block = cross_attention_block
@@ -178,7 +301,8 @@ class Decoder(nn.Module):
     def __init__(self, features: int, layers: nn.ModuleList) -> None:
         super().__init__()
         self.layers = layers
-        self.norm = LayerNormalization(features)
+        self.norm = MicrotensorLayerNorm(features)
+
 
     def forward(self, x, encoder_output, src_mask, tgt_mask):
         for layer in self.layers:
@@ -242,7 +366,14 @@ def build_transformer(src_vocab_size: int, tgt_vocab_size: int, src_seq_len: int
     # create the encoder blocks
     encoder_blocks = []
     for _ in range(N):
-        encoder_self_attention_block = MultiHeadAttentionBlock(d_model, h, dropout)
+        encoder_self_attention_block = MultiHeadLatentAttentionBlock(
+    d_model=d_model,
+    h=h,
+    d_c=512,
+    d_cr=1536,
+    d_rope = 32,
+    dropout=dropout
+)
         feed_forward_block = FeedForwardBlock(d_model, d_ff, dropout)
         encoder_block = EncoderBlock(d_model, encoder_self_attention_block, feed_forward_block, dropout)
         encoder_blocks.append(encoder_block)
@@ -250,8 +381,24 @@ def build_transformer(src_vocab_size: int, tgt_vocab_size: int, src_seq_len: int
     # create the decoder blocks
     decoder_blocks = []
     for _ in range(N):
-        decoder_self_attention_block = MultiHeadAttentionBlock(d_model, h, dropout)
-        decoder_cross_attention_block = MultiHeadAttentionBlock(d_model, h, dropout)
+        decoder_self_attention_block = MultiHeadLatentAttentionBlock(
+    d_model=d_model,
+    h=h,
+    d_c=512,
+    d_cr=1536,
+    d_rope=32,
+    dropout=dropout
+)
+
+        decoder_cross_attention_block = MultiHeadLatentAttentionBlock(
+    d_model=d_model,
+    h=h,
+    d_c=512,
+    d_cr=1536,
+    d_rope=32,
+    dropout=dropout
+)
+
         feed_forward_block = FeedForwardBlock(d_model, d_ff, dropout)
         decoder_block = DecoderBlock(d_model, decoder_self_attention_block, decoder_cross_attention_block, feed_forward_block, dropout)
         decoder_blocks.append(decoder_block)

@@ -27,27 +27,25 @@ from utils.model import build_transformer
 from utils.dataset import BilingualDataset, causal_mask
 from utils.config import get_default_config, get_weights_file_path, get_latest_weights_file_path, ModelConfig
 
-def greedy_decode(model: nn.Module, source: torch.Tensor, source_mask: torch.Tensor, tokenizer_src: Tokenizer, tokenizer_tgt: Tokenizer, max_len: int, device: torch.device):
+def greedy_decode(model: nn.Module, source: torch.Tensor, source_mask: torch.Tensor,
+                  tokenizer_src: Tokenizer, tokenizer_tgt: Tokenizer, max_len: int, device: torch.device):
     sos_idx = tokenizer_tgt.token_to_id('[SOS]')
     eos_idx = tokenizer_tgt.token_to_id('[EOS]')
 
-    # Precompute the encoder output and reuse it for every step
-    encoder_output = model.module.encode(source, source_mask)
-    # Initialize the decoder input with the sos token
+    # Remove the .module – now just use model directly
+    encoder_output = model.encode(source, source_mask)
+
     decoder_input = torch.empty(1, 1).fill_(sos_idx).type_as(source).to(device)
     while True:
         if decoder_input.size(1) == max_len:
             break
 
-        # build mask for target
         decoder_mask = causal_mask(decoder_input.size(1)).type_as(source_mask).to(device)
 
-        # calculate output
-        out = model.module.decode(encoder_output, source_mask, decoder_input, decoder_mask)
-
-        # get next token
-        prob = model.module.project(out[:, -1])
+        out = model.decode(encoder_output, source_mask, decoder_input, decoder_mask)
+        prob = model.project(out[:, -1])
         _, next_word = torch.max(prob, dim=1)
+
         decoder_input = torch.cat(
             [decoder_input, torch.empty(1, 1).type_as(source).fill_(next_word.item()).to(device)], dim=1
         )
@@ -56,6 +54,7 @@ def greedy_decode(model: nn.Module, source: torch.Tensor, source_mask: torch.Ten
             break
 
     return decoder_input.squeeze(0)
+
 
 
 def run_validation(model: nn.Module, validation_ds: DataLoader, tokenizer_src: Tokenizer, tokenizer_tgt: Tokenizer, max_len: int, device: torch.device, print_msg: callable, global_step: int, num_examples: int = 2):
@@ -139,40 +138,36 @@ def get_or_build_tokenizer(config: ModelConfig, ds: Dataset, lang: str) -> Token
         tokenizer = Tokenizer.from_file(str(tokenizer_path))
     return tokenizer
 
+from torch.utils.data import DataLoader
+import torch
+
 def get_ds(config: ModelConfig):
-    # It only has the train split, so we divide it overselves
     ds_raw = load_dataset('opus_books', f"{config.lang_src}-{config.lang_tgt}", split='train')
 
-    # Build tokenizers
-    print(f"GPU {config.local_rank} - Loading tokenizers...")
+    print(f"GPU {getattr(config, 'local_rank', 0)} - Loading tokenizers...")
     tokenizer_src = get_or_build_tokenizer(config, ds_raw, config.lang_src)
     tokenizer_tgt = get_or_build_tokenizer(config, ds_raw, config.lang_tgt)
 
-    # Keep 90% for training, 10% for validation
-    train_ds_size = int(0.9 * len(ds_raw))
-    val_ds_size = len(ds_raw) - train_ds_size
-    train_ds_raw, val_ds_raw = random_split(ds_raw, [train_ds_size, val_ds_size])
+    train_size = int(0.9 * len(ds_raw))
+    val_size = len(ds_raw) - train_size
+    train_raw, val_raw = random_split(ds_raw, [train_size, val_size])
 
-    train_ds = BilingualDataset(train_ds_raw, tokenizer_src, tokenizer_tgt, config.lang_src, config.lang_tgt, config.seq_len)
-    val_ds = BilingualDataset(val_ds_raw, tokenizer_src, tokenizer_tgt, config.lang_src, config.lang_tgt, config.seq_len)
+    train_ds = BilingualDataset(train_raw, tokenizer_src, tokenizer_tgt, config.lang_src, config.lang_tgt, config.seq_len)
+    val_ds = BilingualDataset(val_raw, tokenizer_src, tokenizer_tgt, config.lang_src, config.lang_tgt, config.seq_len)
 
-    # Find the maximum length of each sentence in the source and target sentence
-    max_len_src = 0
-    max_len_tgt = 0
+    max_len_src = max(len(tokenizer_src.encode(item['translation'][config.lang_src]).ids) for item in ds_raw)
+    max_len_tgt = max(len(tokenizer_tgt.encode(item['translation'][config.lang_tgt]).ids) for item in ds_raw)
+    print(f"GPU {getattr(config, 'local_rank', 0)} - Max src len: {max_len_src}, Max tgt len: {max_len_tgt}")
 
-    for item in ds_raw:
-        src_ids = tokenizer_src.encode(item['translation'][config.lang_src]).ids
-        tgt_ids = tokenizer_tgt.encode(item['translation'][config.lang_tgt]).ids
-        max_len_src = max(max_len_src, len(src_ids))
-        max_len_tgt = max(max_len_tgt, len(tgt_ids))
+    # Safely use DistributedSampler only if DDP is initialized
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        from torch.utils.data.distributed import DistributedSampler
+        sampler = DistributedSampler(train_ds, shuffle=True)
+        train_dataloader = DataLoader(train_ds, batch_size=config.batch_size, sampler=sampler)
+    else:
+        train_dataloader = DataLoader(train_ds, batch_size=config.batch_size, shuffle=True)
 
-    print(f'GPU {config.local_rank} - Max length of source sentence: {max_len_src}')
-    print(f'GPU {config.local_rank} - Max length of target sentence: {max_len_tgt}')
-    
-
-    train_dataloader = DataLoader(train_ds, batch_size=config.batch_size, shuffle=False, sampler=DistributedSampler(train_ds, shuffle=True))
     val_dataloader = DataLoader(val_ds, batch_size=1, shuffle=True)
-
     return train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt
 
 def get_model(config: ModelConfig, vocab_src_len: int, vocab_tgt_len: int):
@@ -184,6 +179,13 @@ def train_model(config: ModelConfig):
     assert torch.cuda.is_available(), "Training on CPU is not supported"
     device = torch.device("cuda")
     print(f"GPU {config.local_rank} - Using device: {device}")
+
+    import wandb
+    if not getattr(config, "use_wandb", False):
+        wandb.init = lambda *args, **kwargs: None
+        wandb.log = lambda *args, **kwargs: None
+        wandb.define_metric = lambda *args, **kwargs: None
+
 
     # Make sure the weights folder exists
     Path(config.model_folder).mkdir(parents=True, exist_ok=True)
@@ -237,7 +239,8 @@ def train_model(config: ModelConfig):
 
     # Convert the model to DistributedDataParallel
     # Here we can also specify the bucket_cap_mb parameter to control the size of the buckets
-    model = DistributedDataParallel(model, device_ids=[config.local_rank])
+    if torch.distributed.is_initialized():
+        model = DistributedDataParallel(model, device_ids=[config.local_rank])
 
     loss_fn = nn.CrossEntropyLoss(ignore_index=tokenizer_src.token_to_id('[PAD]'), label_smoothing=0.1).to(device)
 
@@ -296,10 +299,10 @@ def train_model(config: ModelConfig):
             model_filename = get_weights_file_path(config, epoch)
             torch.save({
                 'epoch': epoch,
-                'model_state_dict': model.module.state_dict(), # Need to access module because we are using DDP
+                'model_state_dict': model.module.state_dict() if hasattr(model, "module") else model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'global_step': global_step,
-                'wandb_run_id': wandb.run.id # Save to resume logging data
+                'wandb_run_id': wandb.run.id if wandb.run else None# Save to resume logging data
             }, model_filename)
 
 
