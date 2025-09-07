@@ -308,16 +308,14 @@ Cross-Entropy Loss with Label Smoothing prevents overconfident predictions and i
 
 ### Hybrid Computational Strategy
 
-The machine translation model employs a hybrid approach where MicroTensor handles specific computational kernels while PyTorch manages the overall training infrastructure. This design provides:
-
-1. **Educational Transparency**: Core operations implemented from scratch for understanding
-2. **Production Compatibility**: Seamless integration with PyTorch's training ecosystem  
-3. **Performance Flexibility**: Easy switching between implementations for comparison
+A central motivation for this project was to move beyond implementing tensor operations in isolation and to explore how they are actually used within a Transformer model. To achieve this, I developed a English–Italian  machine translation system where MicroTensor powers the core operations while PyTorch provides the surrounding training infrastructure.I had three key objectives:  
+1. **Develop Understanding**: Demonstrate how fundamental operations such as matrix multiplication, broadcasting, normalization, and softmax combine to form the building blocks of attention and feed-forward networks.  
+2. **Practical Integration**: Retain the robustness of PyTorch’s ecosystem—including distributed training, data loading, and optimization—while substituting selected operations with MicroTensor implementations.  
+3. **Comparative Analysis**: Enable direct comparison between MicroTensor and PyTorch kernels in terms of correctness, efficiency, and memory usage.  
 
 ### DeepSeek-Inspired Multi-Head Attention
 
-The implementation incorporates advanced attention mechanisms inspired by DeepSeek's architecture:
-
+The implementation incorporates advanced attention mechanisms inspired by DeepSeek's architecture, featuring latent space attention compression, rotary position embeddings (RoPE), and MicroTensor-powered computation kernels.
 #### Latent Space Attention Compression
 
 ```python
@@ -326,18 +324,11 @@ class MultiHeadLatentAttentionBlock(Module):
         # Latent space projections for computational efficiency
         self.W_DKV = nn.Linear(d_model, d_c)      # Keys/Values compression
         self.W_DQ = nn.Linear(d_model, d_cr)      # Queries compression
-        self.W_QR = nn.Linear(d_cr, h * d_rope)   # RoPE embeddings
+        self.W_QR = nn.Linear(d_cr, h * d_rope)   # RoPE embeddings    
         self.W_KR = nn.Linear(d_model, d_rope)    # Key RoPE embeddings
 ```
 
-**Design Rationale**:
-- **Computational Efficiency**: Reduces attention complexity from $O(d_{model}^2)$ to $O(d_c \cdot d_{cr})$
-- **Capacity Preservation**: Separate latent spaces for queries vs. keys/values maintain representational power
-- **Position Encoding**: Integrated RoPE (Rotary Position Embedding) for better positional understanding
-
 #### Rotary Position Embeddings (RoPE)
-
-RoPE provides superior positional encoding by rotating query and key vectors in complex space:
 
 ```python
 def apply_rope(self, x):
@@ -347,11 +338,7 @@ def apply_rope(self, x):
     return torch.cat([torch.sin(angle), torch.cos(angle)], dim=-1)
 ```
 
-RoPE maintains relative position information while enabling length extrapolation beyond training sequences.
-
 #### MicroTensor-Powered Attention Computation
-
-The core attention mechanism leverages MicroTensor operations:
 
 ```python
 class MicrotensorAttentionOps:
@@ -380,6 +367,8 @@ class MicrotensorAttentionOps:
         # Convert back to PyTorch tensor
         return torch.tensor(output.data, device=q.device)
 ```
+The attention mechanism reduces computational complexity by projecting keys and values into a lower-dimensional space $d_c$ and queries into $d_{cr}$, while preserving representational power through specialized projection matrices ($W_{DKV}$, $W_{DQ}$, $W_{QR}$, $W_{KR}$). To encode positional information, it incorporates **Rotary Position Embeddings (RoPE)**, which rotate query and key vectors in complex space, enabling the model to capture relative positions and generalize effectively to sequences longer than those seen during training. The **core attention computations** include scaled dot-product attention, causal masking for decoder self-attention, and numerically stable softmax, all executed using MicroTensor operations with efficient conversion between PyTorch and MicroTensor formats. This design demonstrates how custom low-level kernels can be applied within a modern Transformer to achieve both efficiency and educational transparency.
+
 
 ### Feed-Forward Network Enhancement
 
@@ -408,27 +397,6 @@ class MicrotensorFeedForward:
         
         return torch.tensor(out.data, device=x_torch.device)
 ```
-
-### Architectural Integration Pattern
-
-The integration follows a clean abstraction pattern:
-
-```python
-def forward(self, x):
-    if os.environ.get('DISABLE_MICROTENSOR') == '1':
-        # Fallback to pure PyTorch implementation
-        return self.pytorch_implementation(x)
-    else:
-        # Use MicroTensor-enhanced computation
-        return self.microtensor_implementation(x)
-```
-
-This design enables:
-- **Development Flexibility**: Easy comparison between implementations
-- **Debugging Support**: Isolate issues to specific computational backends
-- **Performance Analysis**: Quantify impact of custom implementations
-
----
 
 ## Distributed Training Infrastructure
 
@@ -482,34 +450,12 @@ The `DistributedSampler` ensures each GPU processes different data partitions wh
 
 #### Strategic Memory Clearing
 
-```python
-for epoch in range(num_epochs):
-    torch.cuda.empty_cache()  # Clear cache at epoch start
-    
-    for batch in dataloader:
-        # Training step
-        loss.backward()
-        optimizer.step()
-        optimizer.zero_grad(set_to_none=True)  # Efficient gradient clearing
-```
+The system uses several techniques to manage memory efficiently during training. These include clearing the CUDA cache at epoch boundaries, using `set_to_none=True` for gradient clearing to avoid unnecessary zero-filling of buffers, and ensuring memory is released promptly to keep GPU utilization stable.
 
-**Memory Management Rationale**:
-- `empty_cache()` releases unused cached memory
-- `set_to_none=True` avoids zero-filling gradient buffers, reducing memory allocation overhead
 
 #### Gradient Accumulation Support
 
-```python
-def training_step(model, batch, accumulation_steps=1):
-    loss = model(batch) / accumulation_steps  # Scale loss for accumulation
-    loss.backward()
-    
-    if (step + 1) % accumulation_steps == 0:
-        optimizer.step()
-        optimizer.zero_grad()
-```
-
-Gradient accumulation enables effective larger batch sizes when constrained by GPU memory.
+When GPU memory limits batch size, gradient accumulation provides an effective workaround. Loss values are scaled for accumulation, gradients are collected across multiple micro-batches, and optimizer updates are applied only after the desired number of steps. This enables training with larger effective batch sizes without exceeding hardware constraints.
 
 ### Fault Tolerance and Checkpointing
 
@@ -622,12 +568,6 @@ def apply_dynamic_quantization(model):
 | Activations | 200MB | 230MB | +15% |
 | Peak Memory | 1.8GB | 2.1GB | +17% |
 
-**Performance Trade-off Analysis**:
-- **Computational Overhead**: 17% increase in training time
-- **Memory Overhead**: 17% increase in peak memory usage
-- **Educational Value**: Complete understanding of underlying mechanisms
-- **Research Flexibility**: Easy experimentation with custom operations
-
 ---
 
 ## Production Features
@@ -706,77 +646,3 @@ def greedy_decode(model, source, source_mask, tokenizer_src, tokenizer_tgt, max_
     return decoder_input.squeeze(0)
 ```
 
-#### Beam Search Enhancement
-
-For production deployment, beam search provides better translation quality:
-
-```python
-def beam_search_decode(model, source, beam_size=5, max_len=100):
-    # Maintain top-k hypotheses
-    beams = [(torch.tensor([sos_idx]), 0.0)]  # (sequence, log_prob)
-    
-    for step in range(max_len):
-        candidates = []
-        
-        for sequence, score in beams:
-            if sequence[-1] == eos_idx:
-                candidates.append((sequence, score))
-                continue
-            
-            # Generate next token probabilities
-            logits = model.predict_next(sequence)
-            log_probs = F.log_softmax(logits, dim=-1)
-            
-            # Expand beam with top-k tokens
-            top_k_probs, top_k_indices = log_probs.topk(beam_size)
-            
-            for prob, idx in zip(top_k_probs, top_k_indices):
-                new_sequence = torch.cat([sequence, idx.unsqueeze(0)])
-                new_score = score + prob.item()
-                candidates.append((new_sequence, new_score))
-        
-        # Keep top beam_size candidates
-        beams = sorted(candidates, key=lambda x: x[1], reverse=True)[:beam_size]
-    
-    return beams[0][0]  # Return best hypothesis
-```
-
-### Quality Assurance and Testing
-
-#### Gradient Verification
-
-```python
-def verify_gradients(tensor_op, pytorch_equivalent, input_tensors, epsilon=1e-5):
-    """Verify MicroTensor gradients against PyTorch reference."""
-    
-    # Compute MicroTensor gradients
-    mt_inputs = [MicroTensor(t.detach().numpy(), requires_grad=True) for t in input_tensors]
-    mt_output = tensor_op(*mt_inputs)
-    mt_output.backward()
-    
-    # Compute PyTorch gradients  
-    pt_inputs = [t.clone().detach().requires_grad_(True) for t in input_tensors]
-    pt_output = pytorch_equivalent(*pt_inputs)
-    pt_output.backward()
-    
-    # Compare gradients
-    for mt_input, pt_input in zip(mt_inputs, pt_inputs):
-        gradient_diff = np.abs(mt_input.grad - pt_input.grad.numpy())
-        assert np.all(gradient_diff < epsilon), f"Gradient mismatch: max diff = {gradient_diff.max()}"
-```
-
-#### Integration Testing
-
-```python
-class TestMicroTensorIntegration:
-    def test_attention_mechanism(self):
-        # Test attention computation matches reference implementation
-        batch_size, seq_len, d_model = 2, 10, 512
-        
-        q = torch.randn(batch_size, seq_len, d_model)
-        k = torch.randn(batch_size, seq_len, d_model) 
-        v = torch.randn(batch_size, seq_len, d_model)
-        
-        # Compare MicroTensor vs PyTorch attention
-        mt_output = MicrotensorAttentionOps.scaled_dot_product(q, k, v, scale=1.0)
-        pt_output = torch.nn.functional.scaled_dot_product_attention```
