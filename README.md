@@ -1,10 +1,10 @@
-# MicroTensor: A Deep Learning Framework with Integrated Neural Machine Translation
+# MicroTensor: A Deep Learning Framework 
 
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-red.svg)](https://pytorch.org/)
 [![CUDA](https://img.shields.io/badge/CUDA-11.0+-green.svg)](https://developer.nvidia.com/cuda-downloads)
 
-## Executive Summary
+## Summary
 
 MicroTensor is a production-grade tensor computation library implementing automatic differentiation from first principles, designed to demonstrate the fundamental mechanisms underlying modern deep learning frameworks like PyTorch and TensorFlow. The project showcases practical application through a complete English-to-Italian neural machine translation system built on a novel Transformer architecture that integrates DeepSeek-inspired multi-head attention mechanisms.
 
