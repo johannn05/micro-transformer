@@ -6,9 +6,7 @@
 
 ## Summary
 
-MicroTensor is a production-grade tensor computation library implementing automatic differentiation from first principles, designed to demonstrate the fundamental mechanisms underlying modern deep learning frameworks like PyTorch and TensorFlow. The project showcases practical application through a complete English-to-Italian neural machine translation system built on a novel Transformer architecture that integrates DeepSeek-inspired multi-head attention mechanisms.
-
-This implementation bridges theoretical understanding with production engineering, featuring distributed training capabilities, custom computational kernels, and advanced optimization techniques including dynamic quantization and gradient synchronization across multiple GPU nodes.
+MicroTensor is a tensor computation library implementing automatic differentiation from first principles, with the goal to learn the fundamental mechanisms underlying modern deep learning frameworks like PyTorch and TensorFlow. I then apply this to train a complete English-to-Italian neural machine translation model built on a novel Transformer architecture that integrates DeepSeek-inspired multi-head attention mechanisms. This implementation also features distributed training, custom computational kernels, and optimization techniques including dynamic quantization and gradient synchronization across multiple GPU nodes.
 
 ---
 
@@ -45,7 +43,7 @@ Reverse-mode AD computes this efficiently by:
 
 #### Computational Graph Construction
 
-Each tensor operation creates nodes in a directed acyclic graph (DAG) where nodes represent tensors (intermediate results), edges represent dependencies between operations, and gradient functions store the local derivative computation for each operation. This graph structure enables automatic gradient computation through systematic application of the chain rule.
+Each tensor operation creates nodes in a directed acyclic graph (DAG) where nodes represent tensors (intermediate results), edges represent dependencies between operations, and gradient functions store the local derivative computation for each operation. This graph structure enables automatic gradient computation through applying the chain rule.
 ### Broadcasting Semantics
 
 Broadcasting enables operations between tensors of different shapes by implicitly expanding dimensions according to NumPy broadcasting rules. MicroTensor implements broadcasting with proper gradient flow by tracking which dimensions were expanded and summing gradients accordingly during backpropagation.
@@ -57,7 +55,7 @@ When tensors are broadcasted, gradients must be accumulated correctly:
 - **Size Expansion**: Replicate elements along dimensions where one operand has size 1
 - **Gradient Reduction**: Sum gradients along broadcasted dimensions during backward pass
 
-This ensures gradient correctness regardless of input tensor shapes, enabling flexible neural network architectures.
+This ensures gradient correctness regardless of input tensor shapes.
 
 ---
 
@@ -184,7 +182,7 @@ def backward(self):
 ```
 The backward pass employs depth-first search to construct a topological ordering of the computation graph, ensuring that all dependencies are computed before their dependents. This algorithm visits each tensor exactly once, building the ordering through recursive traversal of parent tensors, then executes gradient functions in reverse topological order.
 #### Gradient Context Management
-The no_grad context manager prevents graph construction and gradient computation when they're not needed, significantly reducing memory usage and computational overhead during inference.
+The no_grad context manager prevents graph construction and gradient computation when they're not needed, significantly reducing memory usage and overhead during inference.
 
 ### Gradient Accumulation Strategies
 
@@ -271,7 +269,7 @@ class Linear(Module):
             self.bias = Tensor(np.zeros(out_features), requires_grad=True)
 ```
 
-Linear layers implement fully connected transformations with He initialization to maintain activation variance across layers, preventing vanishing and exploding gradients in deep networks. The initialization scheme uses bounds calculated from input and output dimensions to ensure proper gradient flow during training.
+Linear layers implement fully connected transformations with He initialization to maintain activation variance across layers, preventing vanishing/exploding gradients in deep networks. The initialization scheme uses bounds calculated from input and output dimensions to ensure proper gradient flow during training.
 #### Layer Normalization
 
 Layer normalization stabilizes training by normalizing activations across feature dimensions:
@@ -300,18 +298,17 @@ def forward(self, x):
 
 **Cross-Entropy Loss with Label Smoothing**:
 
-Cross-Entropy Loss with Label Smoothing prevents overconfident predictions and improves generalization by distributing probability mass across classes. The implementation includes numerical stability measures through max subtraction and proper handling of padding tokens in sequence-to-sequence tasks.
+This prevents overconfident predictions and improves generalization by distributing probability mass across classes. The implementation includes numerical stability measures through max subtraction and proper handling of padding tokens in sequence-to-sequence tasks.
 
 ---
 
 ## Transformer Architecture Integration
 
 ### Hybrid Computational Strategy
-
-A central motivation for this project was to move beyond implementing tensor operations in isolation and to explore how they are actually used within a Transformer model. To achieve this, I developed a English–Italian  machine translation system where MicroTensor powers the core operations while PyTorch provides the surrounding training infrastructure.I had three key objectives:  
-1. **Develop Understanding**: Demonstrate how fundamental operations such as matrix multiplication, broadcasting, normalization, and softmax combine to form the building blocks of attention and feed-forward networks.  
+The main motivation for this project was to move beyond implementing tensor operations in isolation and to explore how they are actually used within a Transformer model. To achieve this, I developed a English–Italian  machine translation model where MicroTensor powers the core operations while PyTorch provides the surrounding training infrastructure.I had three key objectives:  
+1. **Understanding**: Demonstrate how fundamental operations such as matrix multiplication, broadcasting, normalization, and softmax combine to form the building blocks of attention and feed-forward networks.  
 2. **Practical Integration**: Retain the robustness of PyTorch’s ecosystem—including distributed training, data loading, and optimization—while substituting selected operations with MicroTensor implementations.  
-3. **Comparative Analysis**: Enable direct comparison between MicroTensor and PyTorch kernels in terms of correctness, efficiency, and memory usage.  
+3. **Comparison**: Enable direct comparison between MicroTensor and PyTorch kernels in terms of correctness, efficiency, and memory usage.  
 
 ### DeepSeek-Inspired Multi-Head Attention
 
@@ -367,7 +364,7 @@ class MicrotensorAttentionOps:
         # Convert back to PyTorch tensor
         return torch.tensor(output.data, device=q.device)
 ```
-The attention mechanism reduces computational complexity by projecting keys and values into a lower-dimensional space $d_c$ and queries into $d_{cr}$, while preserving representational power through specialized projection matrices ($W_{DKV}$, $W_{DQ}$, $W_{QR}$, $W_{KR}$). To encode positional information, it incorporates **Rotary Position Embeddings (RoPE)**, which rotate query and key vectors in complex space, enabling the model to capture relative positions and generalize effectively to sequences longer than those seen during training. The **core attention computations** include scaled dot-product attention, causal masking for decoder self-attention, and numerically stable softmax, all executed using MicroTensor operations with efficient conversion between PyTorch and MicroTensor formats. This design demonstrates how custom low-level kernels can be applied within a modern Transformer to achieve both efficiency and educational transparency.
+The attention mechanism reduces computational complexity by projecting keys and values into a lower-dimensional space $d_c$ and queries into $d_{cr}$, while preserving representational power through specialized projection matrices ($W_{DKV}$, $W_{DQ}$, $W_{QR}$, $W_{KR}$). To encode positional information, it incorporates **Rotary Position Embeddings (RoPE)**, which rotate query and key vectors in complex space, enabling the model to capture relative positions and generalize effectively to sequences longer than those seen during training. The **core attention computations** include scaled dot-product attention, causal masking for decoder self-attention, and numerically stable softmax, all executed using MicroTensor operations with efficient conversion between PyTorch and MicroTensor formats. This approach shows how custom low-level kernels can be applied within a modern Transformer.
 
 
 ### Feed-Forward Network Enhancement
@@ -480,7 +477,7 @@ The checkpointing system preserves:
 - Experiment tracking information
 - Configuration parameters
 
-This enables seamless training resumption after interruptions.
+This enables seamless training resumption even with interruptions.
 
 ---
 
